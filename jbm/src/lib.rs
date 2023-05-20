@@ -1,4 +1,5 @@
 pub mod async_profiler;
+mod symbol;
 
 use async_trait::async_trait;
 use aya::{
@@ -14,12 +15,7 @@ use aya::{
 use aya_log::BpfLogger;
 use bytes::BytesMut;
 use chrono::{Local, TimeZone};
-use futures::{
-    future::{join_all, select_all},
-    select,
-    stream::unfold,
-    FutureExt,
-};
+use futures::future::join_all;
 use jbm_common::{BlockEvent, Config};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
@@ -28,6 +24,7 @@ use std::{
     ffi::CStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use symbol::Resolver;
 
 const EVENT_MATCH_TIME_THRESHOLD_TIME: Duration = Duration::from_millis(5000);
 const EVENT_MATCH_GIVEUP_TIME: Duration = Duration::from_millis(30000);
@@ -175,6 +172,7 @@ pub struct EventStream {
     bpf_events: HashMap<u32, VecDeque<BpfEvent>>,
     jvm_events: HashMap<u32, VecDeque<JvmEvent>>,
     ksyms: BTreeMap<u64, String>,
+    symbol_resolver: Resolver,
 }
 
 impl EventStream {
@@ -183,6 +181,7 @@ impl EventStream {
             bpf_events: HashMap::new(),
             jvm_events: HashMap::new(),
             ksyms: kernel_symbols().expect("kernel symbols"),
+            symbol_resolver: Resolver::new(),
         }
     }
 
@@ -201,16 +200,17 @@ impl EventStream {
             ));
         }
 
-        let mut user_stack = stack_traces.get(&(event.user_stack_id as u32), 0)?;
-        for frame in user_stack.resolve(&self.ksyms).frames() {
-            // TODO: ksyms doesn't work here I think
-            frames.push((
-                frame.ip,
-                frame
-                    .symbol_name
-                    .clone()
-                    .unwrap_or("[unknown symbol name]".to_string()),
-            ));
+        let user_stack = stack_traces.get(&(event.user_stack_id as u32), 0)?;
+        let user_frames = self.symbol_resolver.resolve(
+            event.tgid,
+            &user_stack
+                .frames()
+                .iter()
+                .map(|f| f.ip as usize)
+                .collect::<Vec<_>>(),
+        )?;
+        for (addr, symbol) in user_frames {
+            frames.push((addr, symbol.unwrap_or("[unknown symbol name]".to_string())));
         }
 
         let comm = CStr::from_bytes_until_nul(&event.name)?

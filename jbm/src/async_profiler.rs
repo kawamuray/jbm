@@ -1,7 +1,6 @@
 use crate::{pid_alive, JvmEvent, JvmStackTraceProvider};
 use anyhow::anyhow;
 use async_trait::async_trait;
-use futures::FutureExt;
 use log::{debug, info, warn};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
