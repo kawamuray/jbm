@@ -17,15 +17,14 @@ use aya_bpf::{
     maps::{HashMap, PerfEventArray, StackTrace},
     programs::ProbeContext,
 };
-use aya_log_ebpf::info;
-use jbm_common::{BlockEvent, Config};
+use jbm_common::{BlockEvent, Config, STACK_STORAGE_SIZE};
 use vmlinux::{pid_t, task_struct};
 
 #[map(name = "START_TIMES")]
 static mut START_TIMES: HashMap<u32, u64> = HashMap::<u32, u64>::with_max_entries(10240, 0);
 
 #[map(name = "STACK_TRACES")]
-static mut STACK_TRACES: StackTrace = StackTrace::with_max_entries(10240, 0);
+static mut STACK_TRACES: StackTrace = StackTrace::with_max_entries(STACK_STORAGE_SIZE as u32, 0);
 
 #[map(name = "EVENTS")]
 static mut EVENTS: PerfEventArray<BlockEvent> = PerfEventArray::new(0);
@@ -34,7 +33,6 @@ static mut EVENTS: PerfEventArray<BlockEvent> = PerfEventArray::new(0);
 #[no_mangle]
 static CONFIG: Config = Config {
     target_tgid: 0,
-    stack_storage_size: 0,
     min_block_us: 0,
     max_block_us: 0,
 };
@@ -100,7 +98,6 @@ unsafe fn try_jbm(ctx: ProbeContext) -> Result<u32, i64> {
         t_start,
         t_end,
     };
-    info!(&ctx, "Sending out event for pid {}", event.pid);
     EVENTS.output(&ctx, &event, 0);
 
     // Signal target thread for taking call trace

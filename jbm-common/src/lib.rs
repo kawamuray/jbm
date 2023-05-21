@@ -1,12 +1,12 @@
 #![no_std]
 
+pub const STACK_STORAGE_SIZE: usize = 10240;
 pub const TASK_COMM_LEN: usize = 16;
 
 #[cfg_attr(feature = "user", derive(Debug, Clone, Copy))]
 #[repr(C)]
 pub struct Config {
     pub target_tgid: u32,
-    pub stack_storage_size: u32,
     pub min_block_us: u64,
     pub max_block_us: u64,
 }

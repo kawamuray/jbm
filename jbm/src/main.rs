@@ -8,6 +8,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::signal;
 
+const DEFAULT_ASYNC_PROFILER_BIN: &'static str = "./async-profiler/profiler.sh";
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -17,14 +19,14 @@ struct Cli {
     min_block_time: u64,
     #[arg(long, default_value_t = 18446744073709551615)]
     max_block_time: u64,
-    #[arg(long, default_value_t = 1024)]
-    stack_storage_size: u32,
     #[arg(long)]
     output: Option<String>,
     #[arg(long)]
     discarded_events_output: Option<String>,
     #[arg(long, default_value_t = false)]
     skip_jvm_stack: bool,
+    #[arg(long)]
+    async_profiler_bin: Option<String>,
 }
 
 #[tokio::main]
@@ -35,15 +37,15 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let config = Config {
         target_tgid: cli.pid,
-        stack_storage_size: cli.stack_storage_size,
         min_block_us: cli.min_block_time,
         max_block_us: cli.max_block_time,
     };
 
     let async_profiler = AsyncProfilerStackTraceProvider::start(
         config.target_tgid,
-        "./async-profiler/profiler.sh".to_string(),
-    ) // TODO: make an option
+        cli.async_profiler_bin
+            .unwrap_or_else(|| DEFAULT_ASYNC_PROFILER_BIN.to_string()),
+    )
     .await?;
     let mut jbm = Jbm::new(config, async_profiler)?;
 

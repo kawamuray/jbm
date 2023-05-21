@@ -12,12 +12,11 @@ use aya::{
     util::{kernel_symbols, online_cpus},
     Bpf, BpfLoader, Btf,
 };
-use aya_log::BpfLogger;
 use bytes::BytesMut;
 use chrono::{Local, TimeZone};
 use futures::future::join_all;
-use jbm_common::{BlockEvent, Config};
-use log::{debug, info, warn};
+use jbm_common::{BlockEvent, Config, STACK_STORAGE_SIZE};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -28,6 +27,7 @@ use symbol::Resolver;
 
 const EVENT_MATCH_TIME_THRESHOLD_TIME: Duration = Duration::from_millis(5000);
 const EVENT_MATCH_GIVEUP_TIME: Duration = Duration::from_millis(30000);
+const STACK_STORAGE_SIZE_CHECK_COUNT: usize = 100;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
@@ -54,10 +54,6 @@ impl<JvmStackP: JvmStackTraceProvider> Jbm<JvmStackP> {
             .set_global("CONFIG", &config)
             .load(bpf_binary)?;
 
-        if let Err(e) = BpfLogger::init(&mut bpf) {
-            // This can happen if you remove all log statements from your eBPF program.
-            warn!("failed to initialize eBPF logger: {}", e);
-        }
         let program: &mut KProbe = bpf.program_mut("jbm").expect("program 'jbm'").try_into()?;
         program.load()?;
         program.attach("finish_task_switch", 0)?;
@@ -82,13 +78,14 @@ impl<JvmStackP: JvmStackTraceProvider> Jbm<JvmStackP> {
         let mut futures = Vec::new();
         for perf_buf in &mut self.perf_buffers {
             futures.push(tokio::time::timeout(Duration::from_millis(1000), async {
-                let mut read_bufs = [BytesMut::with_capacity(1024)]; // TODO: buf size and count
+                let mut read_bufs =
+                    vec![BytesMut::with_capacity(std::mem::size_of::<BlockEvent>()); 5];
                 debug!("Consuming eBPF events");
                 let info = match perf_buf.read_events(&mut read_bufs).await {
                     Ok(info) => info,
                     Err(e) => {
-                        warn!("Failed to poll eBPF buffer: {:?}", e);
-                        return None;
+                        error!("Failed to poll eBPF buffer: {:?}", e);
+                        return vec![];
                     }
                 };
                 if info.lost > 0 {
@@ -99,25 +96,31 @@ impl<JvmStackP: JvmStackTraceProvider> Jbm<JvmStackP> {
                 }
                 debug!("Consumed {} events from eBPF", info.read);
 
-                let mut event: BlockEvent = unsafe { std::mem::zeroed() };
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        read_bufs[0].as_ptr(),
-                        &mut event as *mut BlockEvent as *mut u8,
-                        std::mem::size_of::<BlockEvent>(),
-                    );
-                }
-                Some(event)
+                read_bufs[..info.read]
+                    .into_iter()
+                    .map(|buf| {
+                        let mut event: BlockEvent = unsafe { std::mem::zeroed() };
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                buf.as_ptr(),
+                                &mut event as *mut BlockEvent as *mut u8,
+                                std::mem::size_of::<BlockEvent>(),
+                            );
+                        }
+                        event
+                    })
+                    .collect()
             }));
         }
-        let buckets = join_all(futures).await;
-        for bucket in buckets {
-            if let Ok(bucket) = bucket {
-                let bpf_event = bucket.unwrap();
-                debug!("Consumed eBPF events");
-                // #[cfg(kernel3x)]
-                Self::send_signal(bpf_event.pid as i32);
-                self.stream.add_bpf_event(&self.bpf, bpf_event)?;
+        let bpf_results = join_all(futures).await;
+        for bpf_result in bpf_results {
+            if let Ok(bpf_events) = bpf_result {
+                for bpf_event in bpf_events {
+                    debug!("Consumed eBPF events");
+                    // #[cfg(kernel3x)]
+                    Self::send_signal(bpf_event.pid as i32);
+                    self.stream.add_bpf_event(&self.bpf, bpf_event)?;
+                }
             }
         }
 
@@ -170,6 +173,7 @@ pub struct BpfEvent {
 
 pub struct EventStream {
     bpf_events: HashMap<u32, VecDeque<BpfEvent>>,
+    event_count: usize,
     jvm_events: HashMap<u32, VecDeque<JvmEvent>>,
     ksyms: BTreeMap<u64, String>,
     symbol_resolver: Resolver,
@@ -182,6 +186,7 @@ impl EventStream {
             jvm_events: HashMap::new(),
             ksyms: kernel_symbols().expect("kernel symbols"),
             symbol_resolver: Resolver::new(),
+            event_count: 0,
         }
     }
 
@@ -227,7 +232,17 @@ impl EventStream {
                 duration: Duration::from_micros(event.offtime),
                 stacktrace: frames,
             });
-        // TODO: stack storage size check?
+
+        self.event_count += 1;
+        if self.event_count % STACK_STORAGE_SIZE_CHECK_COUNT == 0 {
+            let cur_size = stack_traces.iter().count();
+            if cur_size >= STACK_STORAGE_SIZE {
+                warn!(
+                    "Stacktraces storage is full, some stacks may be missing in output: {}/{}",
+                    cur_size, STACK_STORAGE_SIZE
+                );
+            }
+        }
 
         Ok(())
     }
