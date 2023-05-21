@@ -53,8 +53,9 @@ async fn main() -> Result<(), anyhow::Error> {
     while !has_done(signal.as_mut()) {
         for (bpf_event, jvm_event) in jbm.process().await? {
             let mut out = format!(
-                "=== {} PID: {}, TID: {} ({}), DURATION: {} us\n",
+                "=== {} {} PID: {}, TID: {} ({}), DURATION: {} us\n",
                 format_time(bpf_event.timestamp),
+                bpf_event.timestamp,
                 bpf_event.pid,
                 bpf_event.tid,
                 bpf_event.comm,

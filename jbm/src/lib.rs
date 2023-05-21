@@ -25,7 +25,7 @@ use std::{
 };
 use symbol::Resolver;
 
-const EVENT_MATCH_TIME_THRESHOLD_TIME: Duration = Duration::from_millis(5000);
+const EVENT_MATCH_TIME_THRESHOLD_TIME: Duration = Duration::from_millis(8000);
 const EVENT_MATCH_GIVEUP_TIME: Duration = Duration::from_millis(30000);
 const STACK_STORAGE_SIZE_CHECK_COUNT: usize = 100;
 
@@ -117,9 +117,11 @@ impl<JvmStackP: JvmStackTraceProvider> Jbm<JvmStackP> {
             if let Ok(bpf_events) = bpf_result {
                 for bpf_event in bpf_events {
                     debug!("Consumed eBPF events");
-                    // #[cfg(kernel3x)]
-                    Self::send_signal(bpf_event.pid as i32);
+                    let pid = bpf_event.pid as i32;
+                    // This calling order is important because event matching relies on timestamp order before/after
                     self.stream.add_bpf_event(&self.bpf, bpf_event)?;
+                    #[cfg(kernel3x)]
+                    Self::send_signal(pid);
                 }
             }
         }
@@ -221,11 +223,13 @@ impl EventStream {
         let comm = CStr::from_bytes_until_nul(&event.name)?
             .to_string_lossy()
             .to_string();
+
+        let timestamp = Self::compute_timestamp(event.t_end);
         self.bpf_events
             .entry(event.pid)
             .or_insert_with(|| VecDeque::new())
             .push_back(BpfEvent {
-                timestamp: time_now(),
+                timestamp,
                 pid: event.tgid,
                 tid: event.pid,
                 comm,
@@ -247,6 +251,22 @@ impl EventStream {
         Ok(())
     }
 
+    fn compute_timestamp(bpf_ktime: u64) -> u64 {
+        let now_ktime = Duration::from(
+            nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+                .expect("clock_gettime(MONOTONIC)"),
+        )
+        .as_nanos() as u64;
+        let offset = now_ktime - bpf_ktime;
+        let now = time_now();
+        let timestamp = now - Duration::from_nanos(offset).as_millis() as u64;
+        debug!(
+            "Event time compute, offset={}, now={}, timestamp={}",
+            offset, now, timestamp
+        );
+        timestamp
+    }
+
     pub fn sweep(&mut self) -> Vec<(BpfEvent, Option<JvmEvent>)> {
         let now = time_now();
 
@@ -266,7 +286,9 @@ impl EventStream {
                     Self::find_matching_jvm_event(bpf_event.timestamp, jvm_queue)
                 {
                     ret.push((bpf_queue.pop_front().unwrap(), Some(jvm_event)));
-                } else if now - bpf_event.timestamp >= EVENT_MATCH_GIVEUP_TIME.as_millis() as u64 {
+                } else if !jvm_queue.is_empty()
+                    || now - bpf_event.timestamp >= EVENT_MATCH_GIVEUP_TIME.as_millis() as u64
+                {
                     ret.push((bpf_queue.pop_front().unwrap(), None));
                 } else {
                     break;
@@ -287,16 +309,21 @@ impl EventStream {
         timestamp: u64,
         jvm_queue: &mut VecDeque<JvmEvent>,
     ) -> Option<JvmEvent> {
-        while let Some(jvm_event) = jvm_queue.pop_front() {
+        while let Some(jvm_event) = jvm_queue.front() {
             debug!(
                 "Finding match, ebpf={}, jvm={}",
                 timestamp, jvm_event.timestamp
             );
             let ts_diff = jvm_event.timestamp as i64 - timestamp as i64;
-            if ts_diff.abs() < EVENT_MATCH_TIME_THRESHOLD_TIME.as_millis() as i64 {
-                return Some(jvm_event);
-            } else if ts_diff < -(EVENT_MATCH_GIVEUP_TIME.as_millis() as i64 / 2) {
-                Self::trash_jvm_event(&jvm_event);
+            if ts_diff < 0 {
+                // There should be no corresponding event for this, trash it.
+                Self::trash_jvm_event(&jvm_queue.pop_front().unwrap());
+            } else if ts_diff < EVENT_MATCH_TIME_THRESHOLD_TIME.as_millis() as i64 {
+                return Some(jvm_queue.pop_front().unwrap());
+            } else {
+                // ts_diff is too large, meaning that there's no chance for the bpf event to get a corresponding
+                // JVM event anymore.
+                break;
             }
         }
         None
@@ -304,13 +331,12 @@ impl EventStream {
 
     fn trash_jvm_event(event: &JvmEvent) {
         let mut out = format!(
-            "{} DISCARDED AP EVENT TID: {}\n",
-            format_time(event.timestamp),
-            event.tid
+            "DISCARDED AP EVENT tid={}, timestamp={}\n",
+            event.tid, event.timestamp
         );
         for (i, frame) in event.frames.iter().enumerate() {
             out.push_str(&format!(
-                "  {}: [0x{:x}] {}",
+                "{}: [0x{:x}] {}",
                 i, frame.method_id, frame.symbol
             ));
             if i > 0 {

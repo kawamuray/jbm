@@ -101,7 +101,7 @@ unsafe fn try_jbm(ctx: ProbeContext) -> Result<u32, i64> {
     EVENTS.output(&ctx, &event, 0);
 
     // Signal target thread for taking call trace
-    // bpf_send_signal_thread(27);
+    bpf_send_signal_thread(27);
 
     Ok(0)
 }
