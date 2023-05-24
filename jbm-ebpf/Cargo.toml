@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-aya-bpf = { git = "https://github.com/aya-rs/aya", branch = "main" }
-aya-log-ebpf = { git = "https://github.com/aya-rs/aya", branch = "main" }
+aya-bpf = { git = "https://github.com/aya-rs/aya", rev = "58f1ecbf0089194d729327692adca6391fc24932" }
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya", rev = "58f1ecbf0089194d729327692adca6391fc24932" }
 jbm-common = { path = "../jbm-common" }
 
 [[bin]]

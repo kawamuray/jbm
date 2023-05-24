@@ -19,6 +19,8 @@ struct Cli {
     min_block_time: u64,
     #[arg(long, default_value_t = 18446744073709551615)]
     max_block_time: u64,
+    #[arg(long, default_value_t = 10240)]
+    stack_storage_size: u32,
     #[arg(long)]
     output: Option<String>,
     #[arg(long)]
@@ -39,6 +41,7 @@ async fn main() -> Result<(), anyhow::Error> {
         target_tgid: cli.pid,
         min_block_us: cli.min_block_time,
         max_block_us: cli.max_block_time,
+        stack_storage_size: cli.stack_storage_size,
     };
 
     let async_profiler = AsyncProfilerStackTraceProvider::start(

@@ -6,11 +6,11 @@ use aya::{
     include_bytes_aligned,
     maps::{
         perf::{AsyncPerfEventArray, AsyncPerfEventArrayBuffer},
-        MapRefMut, StackTraceMap,
+        MapData, StackTraceMap,
     },
     programs::KProbe,
     util::{kernel_symbols, online_cpus},
-    Bpf, BpfLoader, Btf,
+    Bpf, BpfError, BpfLoader, Btf,
 };
 use bytes::BytesMut;
 use chrono::{Local, TimeZone};
@@ -33,7 +33,7 @@ pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
 pub struct Jbm<JvmStackP: JvmStackTraceProvider> {
     bpf: Bpf,
-    perf_buffers: Vec<AsyncPerfEventArrayBuffer<MapRefMut>>,
+    perf_buffers: Vec<AsyncPerfEventArrayBuffer<MapData>>,
     stream: EventStream,
     jvm_stack_provider: JvmStackP,
 }
@@ -49,16 +49,34 @@ impl<JvmStackP: JvmStackTraceProvider> Jbm<JvmStackP> {
         #[cfg(not(debug_assertions))]
         let bpf_binary = include_bytes_aligned!("../../target/bpfel-unknown-none/release/jbm");
 
-        let mut bpf = BpfLoader::new()
-            .btf(Btf::from_sys_fs().ok().as_ref())
-            .set_global("CONFIG", &config)
-            .load(bpf_binary)?;
+        let mut bpf = match Self::load_bpf(&bpf_binary, &config) {
+            Ok(bpf) => bpf,
+            Err(e) => {
+                if let BpfError::MapError(_) = e {
+                    // On some platform BPF map creation can fail with EPERM by lack of
+                    // MEMLOCK resource limit. bcc work-around by increasing resource limit
+                    // when map creation fails with EPERM.
+                    if let Ok(_) = nix::sys::resource::setrlimit(
+                        nix::sys::resource::Resource::RLIMIT_MEMLOCK,
+                        nix::sys::resource::RLIM_INFINITY,
+                        nix::sys::resource::RLIM_INFINITY,
+                    ) {
+                        Self::load_bpf(&bpf_binary, &config)?
+                    } else {
+                        return Err(e.into());
+                    }
+                } else {
+                    return Err(e.into());
+                }
+            }
+        };
 
         let program: &mut KProbe = bpf.program_mut("jbm").expect("program 'jbm'").try_into()?;
         program.load()?;
         program.attach("finish_task_switch", 0)?;
 
-        let mut perf_array = AsyncPerfEventArray::try_from(bpf.map_mut("EVENTS")?)?;
+        let mut perf_array =
+            AsyncPerfEventArray::try_from(bpf.take_map("EVENTS").expect("EVENTS map"))?;
 
         let mut perf_buffers = Vec::new();
         for cpu in online_cpus()? {
@@ -72,6 +90,14 @@ impl<JvmStackP: JvmStackTraceProvider> Jbm<JvmStackP> {
             stream: EventStream::new(),
             jvm_stack_provider,
         })
+    }
+
+    fn load_bpf(bpf_binary: &[u8], config: &Config) -> std::result::Result<Bpf, BpfError> {
+        BpfLoader::new()
+            .btf(Btf::from_sys_fs().ok().as_ref())
+            .set_max_entries("STACK_TRACES", config.stack_storage_size)
+            .set_global("CONFIG", config)
+            .load(bpf_binary)
     }
 
     pub async fn process(&mut self) -> Result<Vec<(BpfEvent, Option<JvmEvent>)>> {
@@ -193,7 +219,8 @@ impl EventStream {
     }
 
     pub fn add_bpf_event(&mut self, bpf: &Bpf, event: BlockEvent) -> Result<()> {
-        let stack_traces = StackTraceMap::try_from(bpf.map("STACK_TRACES")?)?;
+        let stack_traces =
+            StackTraceMap::try_from(bpf.map("STACK_TRACES").expect("STACK_TRACES map"))?;
         let mut frames = Vec::new();
 
         let mut kernel_stack = stack_traces.get(&(event.kernel_stack_id as u32), 0)?;

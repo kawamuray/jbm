@@ -9,6 +9,7 @@ pub struct Config {
     pub target_tgid: u32,
     pub min_block_us: u64,
     pub max_block_us: u64,
+    pub stack_storage_size: u32,
 }
 
 #[cfg_attr(feature = "user", derive(Debug, Clone))]
