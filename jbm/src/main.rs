@@ -1,6 +1,6 @@
 use clap::Parser;
 use jbm::async_profiler::AsyncProfilerStackTraceProvider;
-use jbm::{format_time, Jbm};
+use jbm::{format_time, pid_alive, Jbm};
 use jbm_common::Config;
 use log::info;
 use std::future::Future;
@@ -54,6 +54,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let mut signal = Box::pin(signal::ctrl_c());
     while !has_done(signal.as_mut()) {
+        if !pid_alive(cli.pid) {
+            info!("Quitting as the target pid {} no longer alive", cli.pid);
+            break;
+        }
         for (bpf_event, jvm_event) in jbm.process().await? {
             let mut out = format!(
                 "=== {} {} PID: {}, TID: {} ({}), DURATION: {} us\n",
