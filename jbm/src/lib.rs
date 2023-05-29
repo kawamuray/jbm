@@ -395,3 +395,83 @@ pub fn format_time(timestamp: u64) -> String {
         .format("%Y-%m-%d %H:%M:%S")
         .to_string()
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use std::{
+        process::{Child, Command},
+        time::Duration,
+    };
+
+    use jbm_common::Config;
+
+    use crate::{async_profiler::AsyncProfilerStackTraceProvider, BpfEvent, Jbm, JvmEvent};
+
+    #[tokio::test]
+    async fn test_detect_blocking() -> Result<(), anyhow::Error> {
+        let java_proc = start_test_java();
+        std::thread::sleep(Duration::from_secs(1));
+
+        let config = Config {
+            target_tgid: java_proc.id(),
+            min_block_us: Duration::from_secs(1).as_micros() as u64,
+            max_block_us: Duration::from_secs(10).as_micros() as u64,
+            stack_storage_size: 10240,
+        };
+
+        let async_profiler = AsyncProfilerStackTraceProvider::start(
+            config.target_tgid,
+            "../async-profiler/profiler.sh".to_string(),
+        )
+        .await?;
+
+        let mut jbm = Jbm::new(config, async_profiler)?;
+        std::thread::sleep(Duration::from_secs(20));
+
+        let events = jbm.process().await?;
+
+        let (bpf_event, jvm_event) = find_event(&events, "LOCKER").unwrap();
+
+        assert_ne!(java_proc.id(), bpf_event.tid);
+        assert_eq!(java_proc.id(), bpf_event.pid);
+        assert_eq!("LOCKER", bpf_event.comm);
+        assert!(
+            bpf_event.duration.as_micros() as u64 >= config.min_block_us
+                && bpf_event.duration.as_micros() as u64 <= config.max_block_us
+        );
+        assert!(bpf_event
+            .stacktrace
+            .iter()
+            .find(|(_, sym)| sym.contains("pthread_cond_wait"))
+            .is_some());
+
+        let jvm_event = jvm_event.unwrap();
+        assert_eq!(bpf_event.tid, jvm_event.tid);
+        assert!(jvm_event
+            .frames
+            .iter()
+            .find(|f| f.symbol.contains("TestJavaApp.locker"))
+            .is_some());
+
+        Ok(())
+    }
+
+    fn start_test_java() -> Child {
+        Command::new("java")
+            .args(&["-cp", "./test", "TestJavaApp"])
+            .spawn()
+            .expect("failed to execute java")
+    }
+
+    fn find_event<'a>(
+        events: &'a [(BpfEvent, Option<JvmEvent>)],
+        comm: &str,
+    ) -> Option<(&'a BpfEvent, Option<&'a JvmEvent>)> {
+        for (bpf_event, jvm_event) in events {
+            if bpf_event.comm == comm {
+                return Some((bpf_event, jvm_event.as_ref()));
+            }
+        }
+        None
+    }
+}
