@@ -143,6 +143,7 @@ impl<JvmStackP: JvmStackTraceProvider> Jbm<JvmStackP> {
             if let Ok(bpf_events) = bpf_result {
                 for bpf_event in bpf_events {
                     debug!("Consumed eBPF events");
+                    #[cfg(kernel3x)]
                     let pid = bpf_event.pid as i32;
                     // This calling order is important because event matching relies on timestamp order before/after
                     self.stream.add_bpf_event(&self.bpf, bpf_event)?;
@@ -158,6 +159,7 @@ impl<JvmStackP: JvmStackTraceProvider> Jbm<JvmStackP> {
         Ok(self.stream.sweep())
     }
 
+    #[cfg(kernel3x)]
     fn send_signal(pid: i32) {
         debug!("Signaling {}", pid);
         let error = unsafe { libc::kill(pid, libc::SIGPROF) };
