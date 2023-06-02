@@ -25,8 +25,8 @@ use std::{
 };
 use symbol::Resolver;
 
-const EVENT_MATCH_TIME_THRESHOLD_TIME: Duration = Duration::from_millis(8000);
-const EVENT_MATCH_GIVEUP_TIME: Duration = Duration::from_millis(30000);
+const EVENT_MATCH_TIME_THRESHOLD_TIME: Duration = Duration::from_secs(1);
+const EVENT_MATCH_GIVEUP_TIME: Duration = Duration::from_secs(30);
 const STACK_STORAGE_SIZE_CHECK_COUNT: usize = 100;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
