@@ -254,17 +254,18 @@ impl EventStream {
             .to_string();
 
         let timestamp = Self::compute_timestamp(event.t_end);
+        let bpf_event = BpfEvent {
+            timestamp,
+            pid: event.tgid,
+            tid: event.pid,
+            comm,
+            duration: Duration::from_micros(event.offtime),
+            stacktrace: frames,
+        };
         self.bpf_events
             .entry(event.pid)
             .or_insert_with(|| VecDeque::new())
-            .push_back(BpfEvent {
-                timestamp,
-                pid: event.tgid,
-                tid: event.pid,
-                comm,
-                duration: Duration::from_micros(event.offtime),
-                stacktrace: frames,
-            });
+            .push_back(bpf_event);
 
         self.event_count += 1;
         if self.event_count % STACK_STORAGE_SIZE_CHECK_COUNT == 0 {
@@ -288,7 +289,8 @@ impl EventStream {
         .as_nanos() as u64;
         let offset = now_ktime - bpf_ktime;
         let now = time_now();
-        let timestamp = now - Duration::from_nanos(offset).as_millis() as u64;
+        let timestamp =
+            (Duration::from_millis(now) - Duration::from_nanos(offset)).as_millis() as u64;
         debug!(
             "Event time compute, offset={}, now={}, timestamp={}",
             offset, now, timestamp
@@ -300,7 +302,7 @@ impl EventStream {
         let now = time_now();
 
         let mut empty = VecDeque::with_capacity(0);
-        let mut ret = Vec::new();
+        let mut ret: Vec<(BpfEvent, Option<JvmEvent>)> = Vec::new();
         let tids = self.bpf_events.keys().map(|x| *x).collect::<Vec<_>>();
         for tid in tids {
             let bpf_queue = self.bpf_events.get_mut(&tid).expect("bpf queue present");
@@ -311,6 +313,20 @@ impl EventStream {
                     jvm_queue.len(),
                     tid
                 );
+                if let Some((last_bpf, last_jvm_opt)) = ret.last_mut() {
+                    if let Some(last_jvm) = last_jvm_opt {
+                        let ts_diff = last_jvm.timestamp as i64 - bpf_event.timestamp as i64;
+                        if ts_diff > 0 && (last_jvm.timestamp - last_bpf.timestamp) as i64 > ts_diff
+                        {
+                            debug!("Taking over last pair tid={} last_jvm.timestamp = {}, last_bpf.timestamp = {}, bpf_event.timestamp = {}",
+                                   bpf_event.tid, last_jvm.timestamp, last_bpf.timestamp, bpf_event.timestamp);
+                            let pair = (bpf_queue.pop_front().unwrap(), last_jvm_opt.take());
+                            drop(last_jvm_opt);
+                            ret.push(pair);
+                            continue;
+                        }
+                    }
+                }
                 if let Some(jvm_event) =
                     Self::find_matching_jvm_event(bpf_event.timestamp, jvm_queue)
                 {
