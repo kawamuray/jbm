@@ -35,6 +35,7 @@ static CONFIG: Config = Config {
     target_tgid: 0,
     min_block_us: 0,
     max_block_us: 0,
+    stack_storage_size: 0,
 };
 
 #[kprobe(name = "jbm")]
